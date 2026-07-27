@@ -1,0 +1,53 @@
+diff --git a/src/main/ipc.ts b/src/main/ipc.ts
+index 426ae07..1e614bc 100644
+--- a/src/main/ipc.ts
++++ b/src/main/ipc.ts
+@@ -179,13 +179,11 @@ export default class IPC {
+   }
+ 
+   async checkUpdate () {
+-    await autoUpdater.checkForUpdates()
++    // Updates are delivered through Flathub
+   }
+ 
+   async updateReady () {
+-    const update = await autoUpdater.checkForUpdates()
+-    if (!update) throw new Error('No update available')
+-    await update.downloadPromise
++    throw new Error('Updates are delivered through Flathub')
+   }
+ 
+   async spawnPlayer (url: string) {
+diff --git a/src/main/updater.ts b/src/main/updater.ts
+index cca27ce..0da0526 100644
+--- a/src/main/updater.ts
++++ b/src/main/updater.ts
+@@ -1,26 +1,8 @@
+-import { autoUpdater } from 'electron-updater'
+-
+-// autoUpdater.forceDevUpdateConfig = true
+-autoUpdater.setFeedURL({ url: 'https://api.hayase.watch/files', provider: 'generic' })
+-autoUpdater.checkForUpdates()
+-
++// Updates are delivered through Flathub; the built-in updater is disabled.
+ export default class Updater {
+   hasUpdate = false
+ 
+-  constructor () {
+-    autoUpdater.on('update-downloaded', () => {
+-      this.hasUpdate = true
+-    })
+-
+-    setInterval(() => autoUpdater.checkForUpdates(), 1000 * 60 * 30).unref() // 30 mins
+-  }
+-
+-  install (forceRunAfter = false) {
+-    if (this.hasUpdate) {
+-      autoUpdater.quitAndInstall(true, forceRunAfter)
+-      this.hasUpdate = false
+-      return true
+-    }
++  install (_forceRunAfter = false) {
+     return false
+   }
+ }

@@ -1,0 +1,23 @@
+diff --git a/src/main/plugins.ts b/src/main/plugins.ts
+index 5b4b194..6d6625b 100644
+--- a/src/main/plugins.ts
++++ b/src/main/plugins.ts
+@@ -8,7 +8,7 @@ import {
+ } from 'node:fs/promises'
+ import { basename, dirname, extname, join, relative, resolve } from 'node:path'
+ 
+-import { BrowserWindow, dialog } from 'electron'
++import { app, BrowserWindow, dialog } from 'electron'
+ import log from 'electron-log/main'
+ import read from 'zip-go/lib/read.js'
+ 
+@@ -20,7 +20,8 @@ function joinSafe (base: string, ...paths: string[]): string {
+   return resolved
+ }
+ 
+-const plugins = join(process.resourcesPath, 'plugins')
++// Flatpak: /app is read-only; store user-installed plugins in userData
++const plugins = join(app.getPath('userData'), 'plugins')
+ 
+ async function * pluginPaths () {
+   if (!existsSync(plugins)) return

@@ -1,0 +1,101 @@
+app-id: watch.hayase.Hayase
+runtime: org.freedesktop.Platform
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.node22
+base: org.electronjs.Electron2.BaseApp
+base-version: '25.08'
+command: hayase
+separate-locales: false
+
+finish-args:
+  - --share=network
+  - --share=ipc
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --env=ELECTRON_OZONE_PLATFORM_HINT=auto
+  - --device=dri
+  - --socket=pulseaudio
+# These directories allow users to specify common download dirs, idk if this is 100% necessary
+  - --filesystem=xdg-download
+  - --filesystem=xdg-desktop
+  - --filesystem=xdg-documents
+  - --filesystem=xdg-videos
+  - --talk-name=org.freedesktop.Flatpak
+  - --filesystem=xdg-run/discord-ipc-0
+  - --filesystem=xdg-run/app/com.discordapp.Discord:create
+  - --own-name=org.mpris.MediaPlayer2.chromium.*
+  - --talk-name=org.kde.StatusNotifierWatcher
+  - --talk-name=org.freedesktop.Notifications
+  - --talk-name=org.freedesktop.secrets
+  - --talk-name=org.kde.kwalletd6
+  - --talk-name=org.kde.kwalletd5
+  - --system-talk-name=org.freedesktop.UPower
+  - --system-talk-name=org.freedesktop.login1
+
+modules:
+  - name: hayase
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/node22/bin
+      env:
+        ELECTRON_CACHE: /run/build/hayase/flatpak-node/cache/electron
+        ELECTRON_BUILDER_OFFLINE: 'true'
+    build-commands:
+      - install -d /app/bin
+      - printf '#!/bin/sh\nexec node /run/build/hayase/pnpm-cli/bin/pnpm.cjs "$@"\n'
+        > /app/bin/pnpm
+      - chmod +x /app/bin/pnpm
+      - 'sed -i "s/bytecode: .*/bytecode: false,/" electron.vite.config.ts'
+      - ar x hayase-official.deb data.tar.xz
+      - mkdir -p deb-extract electron-dist
+      - tar -xf data.tar.xz -C deb-extract
+      - mv deb-extract/opt/Hayase electron-dist/electron-v42.2.0-linux-x64
+      - rm -rf electron-dist/electron-v42.2.0-linux-x64/resources
+      - mv electron-dist/electron-v42.2.0-linux-x64/hayase electron-dist/electron-v42.2.0-linux-x64/electron
+      - 'sed -i "s|^files:|files:\n  - \"!flatpak-node/**\"\n  - \"!pnpm-cli/**\"\n  -
+        \"!hayase-run.sh\"\n  - \"!watch.hayase.Hayase.desktop\"\n  - \"!watch.hayase.Hayase.metainfo.xml\"|"
+        electron-builder.yml'
+      - 'sed -i "s|electronDist: electron-dist|electronDist: electron-dist/electron-v42.2.0-linux-$(node
+        -p process.arch)|" electron-builder.yml'
+      - pnpm install --offline
+      - pnpm run build
+      - rm -rf flatpak-node/cache/node-gyp
+      - pnpm exec electron-builder --linux dir
+      - cp -r dist/linux*unpacked /app/main
+      - rm -f /app/main/resources/app-update.yml
+      - rm /app/bin/pnpm
+      - install -Dm755 hayase-run.sh /app/bin/hayase
+      - install -Dm644 watch.hayase.Hayase.desktop -t /app/share/applications
+      - install -Dm644 watch.hayase.Hayase.metainfo.xml -t /app/share/metainfo
+      - install -Dm644 build/icon.png /app/share/icons/hicolor/512x512/apps/watch.hayase.Hayase.png
+      - install -Dm644 LICENSE /app/share/licenses/watch.hayase.Hayase/LICENSE
+    sources:
+      - type: git
+        url: https://github.com/hayase-app/electron.git
+        commit: 1c2ab1ad718e6691531dd8239fee8c2a7ce1c042
+        disable-submodules: true
+      - generated-sources.json
+      - type: patch
+        path: disable-updater.patch
+      - type: patch
+        path: flatpak-plugins-dir.patch
+      - type: patch
+        path: flatpak-external-player.patch
+      - type: archive
+        url: https://registry.npmjs.org/pnpm/-/pnpm-10.28.1.tgz
+        sha256: 52128de921542b1faa91c4c7dec5e88c5736ccb6006b879401e90db275ee4719
+        dest: pnpm-cli
+      - type: file
+        url: https://api.hayase.watch/files/linux-hayase-6.4.83-linux.deb
+        sha256: 2d118c42e346a98ea8772d0a428cf827b40a2593c15f3d039b4da85446f698c9
+        dest-filename: hayase-official.deb
+      - type: script
+        dest-filename: hayase-run.sh
+        commands:
+          - exec zypak-wrapper /app/main/hayase "$@"
+      - type: file
+        path: watch.hayase.Hayase.desktop
+      - type: file
+        path: watch.hayase.Hayase.metainfo.xml

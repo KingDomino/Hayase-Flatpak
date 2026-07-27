@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>watch.hayase.Hayase</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>BUSL-1.1</project_license>
+  <name>Hayase</name>
+  <summary>Torrent streaming made simple</summary>
+  <developer id="watch.hayase">
+    <name>ThaUnknown</name>
+  </developer>
+  <description>
+    <p>
+      Hayase (formerly Miru) streams torrents in real time — watch while you
+      download, with no waiting for downloads to finish. It is a
+      bring-your-own-content application: it does not ship, host, or index any
+      media, and only plays content you supply from sources you are allowed to
+      use.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Instant torrent streaming — watch while you download</li>
+      <li>Anime list integration with AniList, MyAnimeList and Kitsu</li>
+      <li>Full subtitle support: VTT, SSA, ASS, SUB and TXT, including embedded tracks</li>
+      <li>Automatic progress tracking and new episode discovery</li>
+      <li>Watch-together sessions with friends</li>
+      <li>Discord Rich Presence</li>
+      <li>Handles hayase:// deep links</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">watch.hayase.Hayase.desktop</launchable>
+  <content_rating type="oars-1.1">
+    <content_attribute id="social-chat">intense</content_attribute>
+    <content_attribute id="social-info">mild</content_attribute>
+  </content_rating>
+  <url type="homepage">https://hayase.watch</url>
+  <url type="bugtracker">https://github.com/hayase-app/electron/issues</url>
+  <url type="vcs-browser">https://github.com/hayase-app/electron</url>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://hayase.watch/app.webp</image>
+      <caption>Browsing and watching anime in Hayase</caption>
+    </screenshot>
+  </screenshots>
+  <branding>
+    <color type="primary" scheme_preference="light">#dee2ea</color>
+    <color type="primary" scheme_preference="dark">#16161a</color>
+  </branding>
+  <releases>
+    <release version="6.4.83" date="2026-07-15"/>
+  </releases>
+  <requires>
+    <internet>always</internet>
+  </requires>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+  <recommends>
+    <display_length compare="ge">768</display_length>
+  </recommends>
+</component>

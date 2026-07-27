@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Hayase
+Comment=Torrent streaming made simple
+Exec=hayase %U
+Icon=watch.hayase.Hayase
+Terminal=false
+Categories=AudioVideo;Video;
+Keywords=anime;torrent;streaming;anilist;
+MimeType=x-scheme-handler/hayase;
+StartupWMClass=Hayase
+SingleMainWindow=true
