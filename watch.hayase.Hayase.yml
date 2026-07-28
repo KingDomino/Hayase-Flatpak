@@ -17,7 +17,6 @@ finish-args:
   - --env=ELECTRON_OZONE_PLATFORM_HINT=auto
   - --device=dri
   - --socket=pulseaudio
-# These directories allow users to specify common download dirs, idk if this is 100% necessary
   - --filesystem=xdg-download
   - --filesystem=xdg-desktop
   - --filesystem=xdg-documents
@@ -42,19 +41,23 @@ modules:
       env:
         ELECTRON_CACHE: /run/build/hayase/flatpak-node/cache/electron
         ELECTRON_BUILDER_OFFLINE: 'true'
+        ELECTRON_EXEC_PATH: /run/build/hayase/bytecode-electron/electron
     build-commands:
       - install -d /app/bin
       - printf '#!/bin/sh\nexec node /run/build/hayase/pnpm-cli/bin/pnpm.cjs "$@"\n'
         > /app/bin/pnpm
       - chmod +x /app/bin/pnpm
-      - 'sed -i "s/bytecode: .*/bytecode: false,/" electron.vite.config.ts'
+      - unzip -q flatpak-node/cache/electron/electron-v42.2.0-linux-x64.zip -d bytecode-electron
+      - chmod +x bytecode-electron/electron
       - ar x hayase-official.deb data.tar.xz
       - mkdir -p deb-extract electron-dist
       - tar -xf data.tar.xz -C deb-extract
       - mv deb-extract/opt/Hayase electron-dist/electron-v42.2.0-linux-x64
       - rm -rf electron-dist/electron-v42.2.0-linux-x64/resources
       - mv electron-dist/electron-v42.2.0-linux-x64/hayase electron-dist/electron-v42.2.0-linux-x64/electron
+      - rm -rf hayase-official.deb data.tar.xz deb-extract
       - 'sed -i "s|^files:|files:\n  - \"!flatpak-node/**\"\n  - \"!pnpm-cli/**\"\n  -
+        \"!bytecode-electron/**\"\n  -
         \"!hayase-run.sh\"\n  - \"!watch.hayase.Hayase.desktop\"\n  - \"!watch.hayase.Hayase.metainfo.xml\"|"
         electron-builder.yml'
       - 'sed -i "s|electronDist: electron-dist|electronDist: electron-dist/electron-v42.2.0-linux-$(node
