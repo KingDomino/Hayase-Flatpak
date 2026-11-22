@@ -1,9 +1,9 @@
-# Hayase-Flatpak
+# Hayase — Flatpak packaging
 
 Flatpak packaging for [Hayase](https://hayase.watch) (formerly Miru), an anime
 torrent-streaming desktop app. App ID: `watch.hayase.Hayase`.
 
-This repository is **packaging only,** it is not the application's source code, nor does it contain the source code.
+This repository is **packaging only** — it is not the application's source code.
 It builds Hayase from upstream source ([`hayase-app/electron`](https://github.com/hayase-app/electron))
 and runs it on upstream's custom Electron runtime, producing an installable
 Flatpak.
@@ -18,7 +18,7 @@ Flatpak.
   ```sh
   flatpak remote-add --if-not-exists --user flathub https://flathub.org/repo/flathub.flatpakrepo
   ```
-- **x86_64.** The custom Electron runtime is extracted from an x86_64-only
+- **x86_64** — the custom Electron runtime is extracted from an x86_64-only
   release artifact, so this package is x86_64-only (`flathub.json`).
 - **A network connection during the build.** Node dependencies are vendored
   offline (`generated-sources.json`), but flatpak-builder still downloads the
@@ -55,9 +55,7 @@ flatpak uninstall --user watch.hayase.Hayase
 |---|---|
 | `watch.hayase.Hayase.yml` | The flatpak-builder manifest (the entry point). |
 | `generated-sources.json` | Offline npm/pnpm dependency graph, so the sandboxed build needs no npm network access. Generated with `flatpak-node-generator` (pnpm backend). |
-| `disable-updater.patch` | Disables the app's built-in self-updater (Flatpak delivers updates). |
-| `flatpak-plugins-dir.patch` | Stores user-installed plugins under the writable user-data dir instead of the read-only `/app`. |
-| `flatpak-external-player.patch` | Launches external video players on the host via `flatpak-spawn`. |
+| `flatpak-updater.patch` | Routes in-app updates through Flatpak's native `UpdateMonitor` portal when `FLATPAK_ID` is set (leaving non-Flatpak builds untouched). |
 | `watch.hayase.Hayase.desktop` | Desktop entry. |
 | `watch.hayase.Hayase.metainfo.xml` | AppStream metadata. |
 | `flathub.json` | Flathub build config (restricts to x86_64). Not read by a local build. |
@@ -65,17 +63,36 @@ flatpak uninstall --user watch.hayase.Hayase
 All of these must sit in the same directory as the manifest for the build to
 succeed.
 
+## How the build works
+
+1. **App from source** — clones `hayase-app/electron` at a pinned commit,
+   applies the updater patch, installs dependencies offline with pnpm, and runs
+   `electron-builder`. Main-process chunks are compiled to V8 bytecode exactly
+   as in upstream's official builds (a build-only copy of the custom runtime,
+   with its run-as-Node fuse re-enabled, serves as the bytecode compiler, since
+   V8 only accepts bytecode from the exact runtime build that loads it).
+2. **Custom Electron runtime** — upstream's custom Electron (which adds HEVC /
+   AC3 / E-AC3 codec support and extra security fuses) is not published as a
+   standalone download, but the same runtime is embedded in the official `.deb`
+   release. The build downloads that checksum-pinned `.deb`, extracts the
+   runtime, and hands it to `electron-builder` as its `electronDist`. The app is
+   still built entirely from source.
+3. **Offline dependencies** — `generated-sources.json` populates the pnpm store
+   so no packages are fetched from npm at build time.
+
 ## Updating to a new Hayase release
-Note: These updates only apply to the shell, all remote content is updated automatically.
 
 In `watch.hayase.Hayase.yml`:
 
-1. Update the `git` source `commit:` to the new release's commit.
+1. Update the `git` source `commit:` to the new release's commit (upstream no
+   longer tags releases; use the commit whose `package.json` version matches
+   `https://api.hayase.watch/files/latest-linux.yml`).
 2. Update the `.deb` source `url:` and `sha256:` to the matching version.
 3. Regenerate `generated-sources.json` from the new `pnpm-lock.yaml`
    (`flatpak-node-generator pnpm`).
-4. Confirm the three patches still apply against the new commit; regenerate any
-   that don't.
+4. Confirm `flatpak-updater.patch` still applies against the new commit;
+   regenerate it if not. If the Electron version changed, update the
+   `electron-v<ver>-linux-x64` names in the manifest.
 5. Add a `<release>` entry to `watch.hayase.Hayase.metainfo.xml`.
 
 ## Notes
@@ -84,15 +101,15 @@ In `watch.hayase.Hayase.yml`:
   audio/video, GPU, and read/write access to the common download locations
   (Downloads, Desktop, Documents, Videos). The torrent download folder is
   configurable in-app within those locations.
-- **Torrent scratch data** is written to the sandbox's private `/tmp`
-  (`/tmp/webtorrent`), which is a per-instance tmpfs cleared when the app fully
-  quits — so it never accumulates on persistent disk.
-- **Flathub submission:** two `finish-args` entries (host-command access via
-  `flatpak-spawn`, and `login1` system access) require a reviewer-granted
-  exception. They are expected and are not build errors.
+- **Torrent scratch data** is written to host `/tmp/webtorrent`
+  (`--filesystem=/tmp/webtorrent:create`), matching the AppImage and `.deb`
+  releases while keeping the rest of `/tmp` isolated inside the sandbox.
+- **Flathub submission:** the linter warns about host-command access via
+  `flatpak-spawn` (used to launch external players on the host). That warning
+  is expected and not a build error; a Flathub reviewer has to accept it.
 
 ## Links
 
 - Homepage: <https://hayase.watch>
 - Upstream app source: <https://github.com/hayase-app/electron>
-- Hayase's License: BUSL-1.1 (converts to GPL-3.0 on 2029-04-01)
+- License: BUSL-1.1 (converts to GPL-3.0 on 2029-04-01)

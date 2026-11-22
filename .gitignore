@@ -1,0 +1,8 @@
+# flatpak-builder outputs and cache (regenerable from the manifest)
+/builddir/
+/repo/
+/.flatpak-builder/
+
+# Scratch clone of hayase-app/electron used only to author patches;
+# the build fetches its own fresh checkout at the pinned commit
+/electron/

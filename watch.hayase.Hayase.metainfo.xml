@@ -35,6 +35,8 @@
   <url type="homepage">https://hayase.watch</url>
   <url type="bugtracker">https://github.com/hayase-app/electron/issues</url>
   <url type="vcs-browser">https://github.com/hayase-app/electron</url>
+  <url type="help">https://hayase.watch/faq/</url>
+  <url type="donation">https://github.com/sponsors/ThaUnknown</url>
   <screenshots>
     <screenshot type="default">
       <image>https://hayase.watch/app.webp</image>
@@ -46,6 +48,16 @@
     <color type="primary" scheme_preference="dark">#16161a</color>
   </branding>
   <releases>
+    <release version="6.5.10" date="2026-10-22">
+      <description>
+        <ul>
+          <li>New torrent client with lower memory usage and a configurable connection budget</li>
+          <li>Remote access to the torrent client</li>
+          <li>Chromecast fixes</li>
+          <li>Improved video playback on Wayland</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.4.83" date="2026-07-15"/>
   </releases>
   <requires>

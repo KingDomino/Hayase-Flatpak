@@ -1,35 +1,50 @@
 app-id: watch.hayase.Hayase
 runtime: org.freedesktop.Platform
-runtime-version: '25.08'
+runtime-version: '26.08'
 sdk: org.freedesktop.Sdk
 sdk-extensions:
-  - org.freedesktop.Sdk.Extension.node22
+  - org.freedesktop.Sdk.Extension.node24
 base: org.electronjs.Electron2.BaseApp
-base-version: '25.08'
+base-version: '26.08'
 command: hayase
 separate-locales: false
 
 finish-args:
+  # Torrent traffic and the application UI both require network access
   - --share=network
   - --share=ipc
   - --socket=fallback-x11
   - --socket=wayland
   - --env=ELECTRON_OZONE_PLATFORM_HINT=auto
+  # Hardware accelerated video decoding/playback
   - --device=dri
   - --socket=pulseaudio
+  # Default torrent download location plus common user-chosen alternatives;
+  # the download directory is user-configurable in the app settings
+  - --filesystem=/tmp/webtorrent:create
   - --filesystem=xdg-download
   - --filesystem=xdg-desktop
   - --filesystem=xdg-documents
   - --filesystem=xdg-videos
+  # Launch a user-configured external video player on the host
   - --talk-name=org.freedesktop.Flatpak
+  # Discord Rich Presence (src/main/discord.ts, IPC socket transport)
   - --filesystem=xdg-run/discord-ipc-0
   - --filesystem=xdg-run/app/com.discordapp.Discord:create
+  # MPRIS media controls exposed by Chromium's MediaSession implementation
   - --own-name=org.mpris.MediaPlayer2.chromium.*
+  # Tray icon with optional hide-to-tray (src/main/app.ts)
   - --talk-name=org.kde.StatusNotifierWatcher
+  # Taskbar download progress bar via setProgressBar() (src/preload/index.ts)
+  - --talk-name=com.canonical.Unity
+  # Web Notifications requested by the UI go over the notifications bus
   - --talk-name=org.freedesktop.Notifications
+  # Chromium os_crypt cookie encryption via the desktop keyring
   - --talk-name=org.freedesktop.secrets
   - --talk-name=org.kde.kwalletd6
   - --talk-name=org.kde.kwalletd5
+  # Battery status queried by the UI, and Electron powerMonitor's shutdown
+  # handler (src/main/app.ts) — scoped system-bus names, not the full socket
   - --system-talk-name=org.freedesktop.UPower
   - --system-talk-name=org.freedesktop.login1
 
@@ -37,38 +52,67 @@ modules:
   - name: hayase
     buildsystem: simple
     build-options:
-      append-path: /usr/lib/sdk/node22/bin
+      append-path: /usr/lib/sdk/node24/bin
       env:
+        # Point electron tooling at the offline caches provided by
+        # generated-sources.json instead of the network
         ELECTRON_CACHE: /run/build/hayase/flatpak-node/cache/electron
         ELECTRON_BUILDER_OFFLINE: 'true'
+        # Electron used by the bytecode compiler (see the unzip step below)
         ELECTRON_EXEC_PATH: /run/build/hayase/bytecode-electron/electron
     build-commands:
+      # pnpm is vendored as a tarball; corepack would require network access
       - install -d /app/bin
       - printf '#!/bin/sh\nexec node /run/build/hayase/pnpm-cli/bin/pnpm.cjs "$@"\n'
         > /app/bin/pnpm
       - chmod +x /app/bin/pnpm
-      - unzip -q flatpak-node/cache/electron/electron-v42.2.0-linux-x64.zip -d bytecode-electron
-      - chmod +x bytecode-electron/electron
+      # Unpack upstream's custom Electron runtime (HEVC/AC3 codecs and the
+      # extended fuse wire) from the official release and use it as the
+      # electronDist; the app itself is still built from source
       - ar x hayase-official.deb data.tar.xz
       - mkdir -p deb-extract electron-dist
       - tar -xf data.tar.xz -C deb-extract
-      - mv deb-extract/opt/Hayase electron-dist/electron-v42.2.0-linux-x64
-      - rm -rf electron-dist/electron-v42.2.0-linux-x64/resources
-      - mv electron-dist/electron-v42.2.0-linux-x64/hayase electron-dist/electron-v42.2.0-linux-x64/electron
+      - mv deb-extract/opt/Hayase electron-dist/electron-v44.3.0-linux-x64
+      # Drop the prebuilt app payload; electron-builder writes our own build
+      - rm -rf electron-dist/electron-v44.3.0-linux-x64/resources
+      # electron-builder expects the runtime binary to be named 'electron'
+      - mv electron-dist/electron-v44.3.0-linux-x64/hayase electron-dist/electron-v44.3.0-linux-x64/electron
+      # Drop the extraction leftovers, or electron-builder sweeps ~170MB of
+      # deb/tarball into app.asar
       - rm -rf hayase-official.deb data.tar.xz deb-extract
+      # Keep the offline caches and flatpak packaging files out of app.asar
       - 'sed -i "s|^files:|files:\n  - \"!flatpak-node/**\"\n  - \"!pnpm-cli/**\"\n  -
         \"!bytecode-electron/**\"\n  -
         \"!hayase-run.sh\"\n  - \"!watch.hayase.Hayase.desktop\"\n  - \"!watch.hayase.Hayase.metainfo.xml\"|"
         electron-builder.yml'
-      - 'sed -i "s|electronDist: electron-dist|electronDist: electron-dist/electron-v42.2.0-linux-$(node
+      # electron-builder needs the unpacked Electron dist; the project's own
+      # vite plugin extracts the zip it finds in ./electron-dist
+      - 'sed -i "s|electronDist: electron-dist|electronDist: electron-dist/electron-v44.3.0-linux-$(node
         -p process.arch)|" electron-builder.yml'
       - pnpm install --offline
+      # The bytecode plugin compiles the main-process chunks to V8 bytecode by
+      # spawning Electron as plain Node (ELECTRON_RUN_AS_NODE=1, headless), and
+      # V8 only accepts bytecode produced by the same build of the runtime that
+      # loads it (stock 44.3.0 output is rejected despite the identical V8).
+      # The custom runtime has the RunAsNode fuse burned off, so compile with a
+      # copy that has it turned back on; ELECTRON_EXEC_PATH in build-options
+      # points electron-vite at this binary. The shipped runtime keeps its fuses.
+      - cp -a electron-dist/electron-v44.3.0-linux-x64 bytecode-electron
+      - pnpm exec electron-fuses write --app bytecode-electron/electron RunAsNode=on
       - pnpm run build
+      # The node-gyp cache contains symlinks into the SDK which confuse
+      # electron-builder's cache scanning; it is no longer needed after install
       - rm -rf flatpak-node/cache/node-gyp
+      # Set desktopName in package.json so Electron uses the Flatpak desktop ID
+      # for Wayland app_id (window icon / taskbar matching) and Unity progress
+      # bars; must happen before electron-builder so ASAR integrity stays valid
+      - node -e 'const fs = require("fs"); const p = JSON.parse(fs.readFileSync("package.json", "utf8")); p.desktopName = "watch.hayase.Hayase.desktop"; fs.writeFileSync("package.json", JSON.stringify(p, null, 2) + "\n")'
       - pnpm exec electron-builder --linux dir
       - cp -r dist/linux*unpacked /app/main
+      # electron-updater config; the updater is disabled for Flathub
       - rm -f /app/main/resources/app-update.yml
       - rm /app/bin/pnpm
+      # Desktop integration
       - install -Dm755 hayase-run.sh /app/bin/hayase
       - install -Dm644 watch.hayase.Hayase.desktop -t /app/share/applications
       - install -Dm644 watch.hayase.Hayase.metainfo.xml -t /app/share/metainfo
@@ -77,26 +121,32 @@ modules:
     sources:
       - type: git
         url: https://github.com/hayase-app/electron.git
-        commit: 1c2ab1ad718e6691531dd8239fee8c2a7ce1c042
+        commit: 2c1cfd169732c06aca86bf96ba876faf70aadddc
+        # The only submodule (electron-dist) mirrors prebuilt Electron binaries,
+        # which come from the offline cache instead
         disable-submodules: true
       - generated-sources.json
+      # In Flatpak, replace electron-updater with Flatpak's native UpdateMonitor
+      # portal (gated behind FLATPAK_ID so other platforms remain untouched)
       - type: patch
-        path: disable-updater.patch
-      - type: patch
-        path: flatpak-plugins-dir.patch
-      - type: patch
-        path: flatpak-external-player.patch
+        path: flatpak-updater.patch
       - type: archive
         url: https://registry.npmjs.org/pnpm/-/pnpm-10.28.1.tgz
         sha256: 52128de921542b1faa91c4c7dec5e88c5736ccb6006b879401e90db275ee4719
         dest: pnpm-cli
+      # Upstream's custom Electron runtime, taken from the official release
+      # artifact (the standalone dist is not published); pinned by checksum,
+      # matches the pinned source version exactly
       - type: file
-        url: https://api.hayase.watch/files/linux-hayase-6.4.83-linux.deb
-        sha256: 2d118c42e346a98ea8772d0a428cf827b40a2593c15f3d039b4da85446f698c9
+        url: https://api.hayase.watch/files/linux-hayase-6.5.10-linux.deb
+        sha256: f28f1c2448289ddf328b8b619053b7e2e3f6fd140ef5b81b212d5798f9c11e9d
         dest-filename: hayase-official.deb
+      # Wrapper keeping Chromium's sandbox working inside the flatpak sandbox
       - type: script
         dest-filename: hayase-run.sh
         commands:
+          - unset ELECTRON_RUN_AS_NODE
+          - export CHROME_DESKTOP=watch.hayase.Hayase.desktop
           - exec zypak-wrapper /app/main/hayase "$@"
       - type: file
         path: watch.hayase.Hayase.desktop
