@@ -73,8 +73,14 @@ modules:
       - mkdir -p deb-extract electron-dist
       - tar -xf data.tar.xz -C deb-extract
       - mv deb-extract/opt/Hayase electron-dist/electron-v44.3.0-linux-x64
-      # Drop the prebuilt app payload; electron-builder writes our own build
-      - rm -rf electron-dist/electron-v44.3.0-linux-x64/resources
+      # electron-vite's bytecode compiler spawns the electronDist binary
+      # headlessly; keep the default_app.asar it needs to run a script, but
+      # drop upstream's prebuilt app payload (app.asar, app-update.yml,
+      # app.asar.unpacked) so electron-builder writes our own build
+      - rm -f electron-dist/electron-v44.3.0-linux-x64/resources/app.asar \
+          electron-dist/electron-v44.3.0-linux-x64/resources/app-update.yml \
+          electron-dist/electron-v44.3.0-linux-x64/resources/package-type
+      - rm -rf electron-dist/electron-v44.3.0-linux-x64/resources/app.asar.unpacked
       # electron-builder expects the runtime binary to be named 'electron'
       - mv electron-dist/electron-v44.3.0-linux-x64/hayase electron-dist/electron-v44.3.0-linux-x64/electron
       # Drop the extraction leftovers, or electron-builder sweeps ~170MB of
@@ -90,15 +96,16 @@ modules:
       - 'sed -i "s|electronDist: electron-dist|electronDist: electron-dist/electron-v44.3.0-linux-$(node
         -p process.arch)|" electron-builder.yml'
       - pnpm install --offline
-      # The bytecode plugin compiles the main-process chunks to V8 bytecode by
-      # spawning Electron as plain Node (ELECTRON_RUN_AS_NODE=1, headless), and
-      # V8 only accepts bytecode produced by the same build of the runtime that
+      # The bytecode compiler spawns Electron headlessly (--no-sandbox
+      # --ozone-platform=headless) to run electron-bytecode-main.cjs, and V8
+      # only accepts bytecode produced by the same build of the runtime that
       # loads it (stock 44.3.0 output is rejected despite the identical V8).
-      # The custom runtime has the RunAsNode fuse burned off, so compile with a
-      # copy that has it turned back on; ELECTRON_EXEC_PATH in build-options
-      # points electron-vite at this binary. The shipped runtime keeps its fuses.
+      # The custom runtime from the .deb has its security fuses burned in,
+      # so compile with a throwaway copy that has the loader/codegen fuses
+      # flipped off; ELECTRON_EXEC_PATH points electron-vite at this binary.
+      # The shipped runtime keeps all its fuses.
       - cp -a electron-dist/electron-v44.3.0-linux-x64 bytecode-electron
-      - pnpm exec electron-fuses write --app bytecode-electron/electron RunAsNode=on
+      - pnpm exec electron-fuses write --app bytecode-electron/electron RunAsNode=on OnlyLoadAppFromAsar=off EnableEmbeddedAsarIntegrityValidation=off DisallowCodeGenerationFromStrings=off FrozenIntrinsics=off DisableProtoThrow=off
       - pnpm run build
       # The node-gyp cache contains symlinks into the SDK which confuse
       # electron-builder's cache scanning; it is no longer needed after install
@@ -121,13 +128,14 @@ modules:
     sources:
       - type: git
         url: https://github.com/hayase-app/electron.git
-        commit: 2c1cfd169732c06aca86bf96ba876faf70aadddc
+        commit: 19c14aae0e529aad82945d7f964843da225533e7
         # The only submodule (electron-dist) mirrors prebuilt Electron binaries,
         # which come from the offline cache instead
         disable-submodules: true
       - generated-sources.json
-      # In Flatpak, replace electron-updater with Flatpak's native UpdateMonitor
-      # portal (gated behind FLATPAK_ID so other platforms remain untouched)
+      # In Flatpak, replace electron-updater with Flathub AppStream API +
+      # /app/.updated checks and appstream:// software-center updates
+      # (hayase-app/electron#8, gated behind FLATPAK_ID)
       - type: patch
         path: flatpak-updater.patch
       - type: archive
@@ -138,15 +146,22 @@ modules:
       # artifact (the standalone dist is not published); pinned by checksum,
       # matches the pinned source version exactly
       - type: file
-        url: https://api.hayase.watch/files/linux-hayase-6.5.10-linux.deb
-        sha256: f28f1c2448289ddf328b8b619053b7e2e3f6fd140ef5b81b212d5798f9c11e9d
+        url: https://api.hayase.watch/files/linux-hayase-6.5.11-linux.deb
+        sha256: 034b9921ba47f5d83f0c4ab1ab9387e9d3a3f2ed0fd3e210ea320617d11ba059
         dest-filename: hayase-official.deb
       # Wrapper keeping Chromium's sandbox working inside the flatpak sandbox
+      # and exposing Flatpak Discord's IPC sockets in XDG_RUNTIME_DIR
       - type: script
         dest-filename: hayase-run.sh
         commands:
           - unset ELECTRON_RUN_AS_NODE
           - export CHROME_DESKTOP=watch.hayase.Hayase.desktop
+          - |
+            if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+              for i in 0 1 2 3 4 5 6 7 8 9; do
+                test -S "$XDG_RUNTIME_DIR/discord-ipc-$i" || ln -sf "app/com.discordapp.Discord/discord-ipc-$i" "$XDG_RUNTIME_DIR/discord-ipc-$i"
+              done
+            fi
           - exec zypak-wrapper /app/main/hayase "$@"
       - type: file
         path: watch.hayase.Hayase.desktop

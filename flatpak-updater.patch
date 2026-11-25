@@ -1,651 +1,81 @@
-diff --git a/src/main/flatpak-updater.ts b/src/main/flatpak-updater.ts
+diff --git a/src/main/flatpak.ts b/src/main/flatpak.ts
 new file mode 100644
-index 0000000..a329770
+index 0000000..508ea15
 --- /dev/null
-+++ b/src/main/flatpak-updater.ts
-@@ -0,0 +1,640 @@
++++ b/src/main/flatpak.ts
+@@ -0,0 +1,70 @@
 +import { spawn } from 'node:child_process'
 +import { EventEmitter } from 'node:events'
 +import { existsSync } from 'node:fs'
-+import { createConnection, type Socket } from 'node:net'
-+import { env, getuid } from 'node:process'
++import { env } from 'node:process'
++import { setTimeout as sleep } from 'node:timers/promises'
 +
-+import { app } from 'electron'
++import { app, shell } from 'electron'
 +import log from 'electron-log/main'
 +
-+const DBUS_DEST = 'org.freedesktop.DBus'
-+const DBUS_PATH = '/org/freedesktop/DBus'
-+const DBUS_IFACE = 'org.freedesktop.DBus'
++// Flatpak writes this into the running version's files once a newer version is installed
++const UPDATED = '/app/.updated'
 +
-+const PORTAL_DEST = 'org.freedesktop.portal.Flatpak'
-+const PORTAL_PATH = '/org/freedesktop/portal/Flatpak'
-+const PORTAL_IFACE = 'org.freedesktop.portal.Flatpak'
-+const MONITOR_IFACE = 'org.freedesktop.portal.Flatpak.UpdateMonitor'
-+
-+const MSG_METHOD_CALL = 1
-+const MSG_METHOD_RETURN = 2
-+const MSG_ERROR = 3
-+const MSG_SIGNAL = 4
-+
-+const FIELD_PATH = 1
-+const FIELD_INTERFACE = 2
-+const FIELD_MEMBER = 3
-+const FIELD_ERROR_NAME = 4
-+const FIELD_REPLY_SERIAL = 5
-+const FIELD_DESTINATION = 6
-+const FIELD_SIGNATURE = 8
-+
-+const STATUS_RUNNING = 0
-+const STATUS_EMPTY = 1
-+const STATUS_DONE = 2
-+const STATUS_FAILED = 3
-+
-+interface DbusSignal {
-+  path?: string
-+  iface?: string
-+  member?: string
-+  body: Buffer
-+  le: boolean
-+}
-+
-+interface PendingCall {
-+  resolve: (body: Buffer, le: boolean) => void
-+  reject: (err: Error) => void
-+}
-+
-+function alignUp (n: number, align: number): number {
-+  const rem = n % align
-+  return rem === 0 ? n : n + (align - rem)
-+}
-+
-+function padBuffer (buf: Buffer, align: number): Buffer {
-+  const target = alignUp(buf.length, align)
-+  return target === buf.length ? buf : Buffer.concat([buf, Buffer.alloc(target - buf.length)])
-+}
-+
-+function encodeString (str: string): Buffer {
-+  const bytes = Buffer.from(str, 'utf8')
-+  const out = Buffer.alloc(4 + bytes.length + 1)
-+  out.writeUInt32LE(bytes.length, 0)
-+  bytes.copy(out, 4)
-+  return out
-+}
-+
-+function encodeSignature (sig: string): Buffer {
-+  const bytes = Buffer.from(sig, 'ascii')
-+  const out = Buffer.alloc(1 + bytes.length + 1)
-+  out.writeUInt8(bytes.length, 0)
-+  bytes.copy(out, 1)
-+  return out
-+}
-+
-+function encodeHeaderField (code: number, sig: string, value: Buffer): Buffer {
-+  const prefix = Buffer.concat([Buffer.from([code]), encodeSignature(sig)])
-+  const align = sig === 's' || sig === 'o' || sig === 'u' ? 4 : 1
-+  return Buffer.concat([padBuffer(prefix, align), value])
-+}
-+
-+function encodeMethodCall (
-+  serial: number,
-+  path: string,
-+  iface: string,
-+  member: string,
-+  dest: string,
-+  sig = '',
-+  body: Buffer = Buffer.alloc(0)
-+): Buffer {
-+  const rawFields: Array<[number, string, Buffer]> = [
-+    [FIELD_PATH, 'o', encodeString(path)],
-+    [FIELD_INTERFACE, 's', encodeString(iface)],
-+    [FIELD_MEMBER, 's', encodeString(member)],
-+    [FIELD_DESTINATION, 's', encodeString(dest)]
-+  ]
-+  if (sig) rawFields.push([FIELD_SIGNATURE, 'g', encodeSignature(sig)])
-+
-+  let fields: Buffer = Buffer.alloc(0)
-+  for (const [code, fsig, val] of rawFields) {
-+    fields = Buffer.concat([padBuffer(fields, 8), encodeHeaderField(code, fsig, val)])
-+  }
-+
-+  const fixed = Buffer.alloc(16)
-+  fixed.writeUInt8(0x6c, 0) // 'l' little-endian
-+  fixed.writeUInt8(MSG_METHOD_CALL, 1)
-+  fixed.writeUInt8(0, 2)
-+  fixed.writeUInt8(1, 3)
-+  fixed.writeUInt32LE(body.length, 4)
-+  fixed.writeUInt32LE(serial, 8)
-+  fixed.writeUInt32LE(fields.length, 12)
-+
-+  return Buffer.concat([padBuffer(Buffer.concat([fixed, fields]), 8), body])
-+}
-+
-+class DbusReader {
-+  buf: Buffer
-+  le: boolean
-+  offset = 0
-+
-+  constructor (buf: Buffer, le: boolean) {
-+    this.buf = buf
-+    this.le = le
-+  }
-+
-+  align (a: number) {
-+    this.offset = alignUp(this.offset, a)
-+  }
-+
-+  u8 (): number {
-+    const v = this.buf.readUInt8(this.offset)
-+    this.offset += 1
-+    return v
-+  }
-+
-+  u16 (): number {
-+    this.align(2)
-+    const v = this.le ? this.buf.readUInt16LE(this.offset) : this.buf.readUInt16BE(this.offset)
-+    this.offset += 2
-+    return v
-+  }
-+
-+  i16 (): number {
-+    this.align(2)
-+    const v = this.le ? this.buf.readInt16LE(this.offset) : this.buf.readInt16BE(this.offset)
-+    this.offset += 2
-+    return v
-+  }
-+
-+  u32 (): number {
-+    this.align(4)
-+    const v = this.le ? this.buf.readUInt32LE(this.offset) : this.buf.readUInt32BE(this.offset)
-+    this.offset += 4
-+    return v
-+  }
-+
-+  i32 (): number {
-+    this.align(4)
-+    const v = this.le ? this.buf.readInt32LE(this.offset) : this.buf.readInt32BE(this.offset)
-+    this.offset += 4
-+    return v
-+  }
-+
-+  str (): string {
-+    const len = this.u32()
-+    const s = this.buf.toString('utf8', this.offset, this.offset + len)
-+    this.offset += len + 1
-+    return s
-+  }
-+
-+  sig (): string {
-+    const len = this.u8()
-+    const s = this.buf.toString('ascii', this.offset, this.offset + len)
-+    this.offset += len + 1
-+    return s
-+  }
-+
-+  variant (): unknown {
-+    const s = this.sig()
-+    switch (s) {
-+      case 's':
-+      case 'o':
-+        return this.str()
-+      case 'g':
-+        return this.sig()
-+      case 'u':
-+        return this.u32()
-+      case 'i':
-+        return this.i32()
-+      case 'b':
-+        return this.u32() !== 0
-+      case 'y':
-+        return this.u8()
-+      case 'q':
-+        return this.u16()
-+      case 'n':
-+        return this.i16()
-+      case 't':
-+        this.align(8)
-+        {
-+          const v = this.le ? this.buf.readBigUInt64LE(this.offset) : this.buf.readBigUInt64BE(this.offset)
-+          this.offset += 8
-+          return v
-+        }
-+      case 'x':
-+        this.align(8)
-+        {
-+          const v = this.le ? this.buf.readBigInt64LE(this.offset) : this.buf.readBigInt64BE(this.offset)
-+          this.offset += 8
-+          return v
-+        }
-+      case 'd':
-+        this.align(8)
-+        {
-+          const v = this.le ? this.buf.readDoubleLE(this.offset) : this.buf.readDoubleBE(this.offset)
-+          this.offset += 8
-+          return v
-+        }
-+      default:
-+        return undefined
-+    }
-+  }
-+}
-+
-+function decodeDict (buf: Buffer, le: boolean): Record<string, unknown> {
-+  const result: Record<string, unknown> = {}
-+  if (buf.length < 4) return result
-+  const reader = new DbusReader(buf, le)
-+  const arrayLen = reader.u32()
-+  reader.align(8)
-+  const end = Math.min(buf.length, reader.offset + arrayLen)
-+  while (reader.offset < end) {
-+    reader.align(8)
-+    if (reader.offset >= end) break
-+    const key = reader.str()
-+    const val = reader.variant()
-+    if (val === undefined) break
-+    result[key] = val
-+  }
-+  return result
-+}
-+
-+function parseSessionBusAddress (addr: string): string {
-+  for (const part of addr.split(';')) {
-+    if (!part.startsWith('unix:')) continue
-+    for (const kv of part.slice(5).split(',')) {
-+      const [k, v] = kv.split('=')
-+      if (!v) continue
-+      const decoded = decodeURIComponent(v)
-+      if (k === 'path') return decoded
-+      if (k === 'abstract') return '\0' + decoded
-+    }
-+  }
-+  throw new Error(`Unsupported DBUS_SESSION_BUS_ADDRESS: ${addr}`)
-+}
-+
-+class DbusSessionClient extends EventEmitter {
-+  private socket: Socket
-+  private serial = 1
-+  private pending = new Map<number, PendingCall>()
-+  private buffer: Buffer = Buffer.alloc(0)
-+  private authenticated = false
-+  private authBuf = ''
-+  ready: Promise<void>
-+
-+  constructor (busAddress: string) {
-+    super()
-+    const socketPath = parseSessionBusAddress(busAddress)
-+    this.socket = createConnection(socketPath)
-+    this.socket.unref()
-+
-+    this.ready = new Promise<void>((resolve, reject) => {
-+      const onEarlyError = (err: Error) => reject(err)
-+      this.socket.once('error', onEarlyError)
-+      this.socket.once('connect', () => {
-+        const uid = getuid?.() ?? 1000
-+        const uidHex = Buffer.from(String(uid), 'ascii').toString('hex')
-+        this.socket.write(`\0AUTH EXTERNAL ${uidHex}\r\n`)
-+      })
-+
-+      const onData = (chunk: Buffer) => {
-+        if (!this.authenticated) {
-+          this.authBuf += chunk.toString('latin1')
-+          const lineEnd = this.authBuf.indexOf('\r\n')
-+          if (lineEnd === -1) return
-+          const line = this.authBuf.slice(0, lineEnd)
-+          const remainder = this.authBuf.slice(lineEnd + 2)
-+          if (!line.startsWith('OK ')) {
-+            this.socket.destroy()
-+            reject(new Error(`D-Bus auth failed: ${line}`))
-+            return
-+          }
-+          this.authenticated = true
-+          this.socket.removeListener('error', onEarlyError)
-+          this.socket.write('BEGIN\r\n')
-+          if (remainder.length > 0) {
-+            this.buffer = Buffer.concat([this.buffer, Buffer.from(remainder, 'latin1')])
-+            this.drain()
-+          }
-+          this.call(DBUS_DEST, DBUS_PATH, DBUS_IFACE, 'Hello')
-+            .then(() => resolve())
-+            .catch(reject)
-+          return
-+        }
-+
-+        this.buffer = Buffer.concat([this.buffer, chunk])
-+        this.drain()
-+      }
-+
-+      this.socket.on('data', onData)
-+    })
-+
-+    this.socket.on('error', (err) => {
-+      this.failPending(err)
-+      this.emit('error', err)
-+    })
-+    this.socket.on('close', () => {
-+      this.failPending(new Error('D-Bus connection closed'))
-+      this.emit('close')
-+    })
-+  }
-+
-+  private failPending (err: Error) {
-+    for (const call of this.pending.values()) {
-+      call.reject(err)
-+    }
-+    this.pending.clear()
-+  }
-+
-+  private drain () {
-+    while (this.buffer.length >= 16) {
-+      const endian = this.buffer.readUInt8(0)
-+      const le = endian === 0x6c // 'l'
-+      const mtype = this.buffer.readUInt8(1)
-+      const bodyLen = le ? this.buffer.readUInt32LE(4) : this.buffer.readUInt32BE(4)
-+      const fieldsLen = le ? this.buffer.readUInt32LE(12) : this.buffer.readUInt32BE(12)
-+      const headerTotal = alignUp(16 + fieldsLen, 8)
-+      const total = headerTotal + bodyLen
-+      if (this.buffer.length < total) return
-+
-+      const fieldsBuf = this.buffer.subarray(16, 16 + fieldsLen)
-+      const bodyBuf = Buffer.from(this.buffer.subarray(headerTotal, total))
-+      this.buffer = this.buffer.subarray(total)
-+
-+      this.handleMessage(mtype, le, fieldsBuf, bodyBuf)
-+    }
-+  }
-+
-+  private handleMessage (mtype: number, le: boolean, fieldsBuf: Buffer, body: Buffer) {
-+    const reader = new DbusReader(fieldsBuf, le)
-+    let path: string | undefined
-+    let iface: string | undefined
-+    let member: string | undefined
-+    let errorName: string | undefined
-+    let replySerial: number | undefined
-+
-+    while (reader.offset < fieldsBuf.length) {
-+      reader.align(8)
-+      if (reader.offset >= fieldsBuf.length) break
-+      const code = reader.u8()
-+      const val = reader.variant()
-+      if (code === FIELD_PATH && typeof val === 'string') path = val
-+      else if (code === FIELD_INTERFACE && typeof val === 'string') iface = val
-+      else if (code === FIELD_MEMBER && typeof val === 'string') member = val
-+      else if (code === FIELD_ERROR_NAME && typeof val === 'string') errorName = val
-+      else if (code === FIELD_REPLY_SERIAL && typeof val === 'number') replySerial = val
-+    }
-+
-+    if (mtype === MSG_METHOD_RETURN && replySerial !== undefined) {
-+      const call = this.pending.get(replySerial)
-+      if (call) {
-+        this.pending.delete(replySerial)
-+        call.resolve(body, le)
-+      }
-+    } else if (mtype === MSG_ERROR && replySerial !== undefined) {
-+      const call = this.pending.get(replySerial)
-+      if (call) {
-+        this.pending.delete(replySerial)
-+        let detail = ''
-+        try {
-+          if (body.length >= 4) detail = new DbusReader(body, le).str()
-+        } catch {}
-+        call.reject(new Error(`${errorName ?? 'D-Bus error'}${detail ? ': ' + detail : ''}`))
-+      }
-+    } else if (mtype === MSG_SIGNAL) {
-+      const sig: DbusSignal = { path, iface, member, body, le }
-+      this.emit('signal', sig)
-+    }
-+  }
-+
-+  call (
-+    dest: string,
-+    path: string,
-+    iface: string,
-+    member: string,
-+    sig = '',
-+    body: Buffer = Buffer.alloc(0)
-+  ): Promise<{ body: Buffer, le: boolean }> {
-+    const serial = this.serial++
-+    const frame = encodeMethodCall(serial, path, iface, member, dest, sig, body)
-+    return new Promise((resolve, reject) => {
-+      this.pending.set(serial, {
-+        resolve: (respBody, le) => resolve({ body: respBody, le }),
-+        reject
-+      })
-+      this.socket.write(frame)
-+    })
-+  }
-+
-+  close () {
-+    this.failPending(new Error('D-Bus client closed'))
-+    this.socket.destroy()
-+  }
-+}
-+
-+export default class FlatpakUpdater extends EventEmitter {
++// electron-updater for Flatpak, the user's software center installs the update
++export default class Flatpak extends EventEmitter {
 +  hasUpdate = false
-+  private client?: DbusSessionClient
-+  private monitorHandle?: string
-+  private monitorPromise?: Promise<string>
-+  private updating = false
-+  private downloadPromise?: Promise<void>
-+  private resolveDownload?: () => void
-+  private rejectDownload?: (err: Error) => void
-+  private runningCommit?: string
-+  private localCommit?: string
-+  private closed = false
++  error: Error | undefined
 +
-+  private async ensureClient (): Promise<DbusSessionClient> {
-+    if (this.client) {
-+      await this.client.ready
-+      return this.client
-+    }
-+    const addr = env.DBUS_SESSION_BUS_ADDRESS
-+    if (!addr) throw new Error('DBUS_SESSION_BUS_ADDRESS is not set')
++  constructor () {
++    super()
++    this.check()
++    setInterval(() => this.check(), 1000 * 60 * 30).unref() // 30 mins
++  }
 +
-+    const client = new DbusSessionClient(addr)
-+    this.client = client
-+    client.on('signal', (sig: DbusSignal) => this.onSignal(sig))
-+    client.on('error', (err: Error) => log.error('[FlatpakUpdater] D-Bus error:', err))
-+    client.on('close', () => {
-+      if (this.client === client) {
-+        this.client = undefined
-+        this.monitorHandle = undefined
-+        this.monitorPromise = undefined
-+      }
-+    })
-+
++  async check () {
++    this.error = undefined
 +    try {
-+      await client.ready
-+      const rule = `type='signal',sender='${PORTAL_DEST}',interface='${MONITOR_IFACE}'`
-+      await client.call(DBUS_DEST, DBUS_PATH, DBUS_IFACE, 'AddMatch', 's', encodeString(rule))
-+      return client
++      if (!existsSync(UPDATED)) {
++        const res = await fetch(`https://flathub.org/api/v2/appstream/${env.FLATPAK_ID}`)
++        // not on Flathub, so there is nothing to update from
++        if (res.status === 404) return
++        if (!res.ok) throw new Error('Flathub returned ' + res.status)
++        const { releases } = await res.json() as { releases: Array<{ version: string }> }
++        if (releases[0]?.version === app.getVersion()) return
++      }
++      this.hasUpdate = true
++      this.emit('update-downloaded')
 +    } catch (err) {
-+      if (this.client === client) this.client = undefined
-+      client.close()
-+      throw err
++      log.error('Failed to check Flathub for updates:', err)
++      this.error = err as Error
 +    }
 +  }
 +
-+  private markUpdateReady () {
-+    if (this.hasUpdate) return
-+    this.hasUpdate = true
-+    this.emit('download-progress', { percent: 100 })
-+    this.emit('update-downloaded')
++  async updateReady () {
++    await this.check()
++    if (this.error) throw this.error
++    if (!this.hasUpdate) throw new Error('No update available')
 +  }
 +
-+  private async ensureMonitor (): Promise<string> {
-+    if (this.monitorHandle) return this.monitorHandle
-+    if (this.monitorPromise) return await this.monitorPromise
-+
-+    this.monitorPromise = (async () => {
-+      const client = await this.ensureClient()
-+      // Empty a{sv}: u32(0) + 4-byte pad for 8-byte dict_entry alignment
-+      const { body, le } = await client.call(
-+        PORTAL_DEST,
-+        PORTAL_PATH,
-+        PORTAL_IFACE,
-+        'CreateUpdateMonitor',
-+        'a{sv}',
-+        Buffer.alloc(8)
-+      )
-+      const handle = new DbusReader(body, le).str()
-+      this.monitorHandle = handle
-+      log.info('[FlatpakUpdater] Monitoring for updates via', handle)
-+      return handle
-+    })()
-+
-+    try {
-+      return await this.monitorPromise
-+    } finally {
-+      this.monitorPromise = undefined
-+    }
++  // restarts once the software center installed the update
++  async update () {
++    if (!existsSync(UPDATED)) await shell.openExternal(`appstream://${env.FLATPAK_ID}`)
++    while (!existsSync(UPDATED)) await sleep(1000)
 +  }
 +
-+  private onSignal (sig: DbusSignal) {
-+    if (this.closed || sig.iface !== MONITOR_IFACE) return
-+    if (sig.path && !this.monitorHandle) this.monitorHandle = sig.path
-+
-+    if (sig.member === 'UpdateAvailable') {
-+      const info = decodeDict(sig.body, sig.le)
-+      const running = typeof info['running-commit'] === 'string' ? info['running-commit'] : undefined
-+      const local = typeof info['local-commit'] === 'string' ? info['local-commit'] : undefined
-+      const remote = typeof info['remote-commit'] === 'string' ? info['remote-commit'] : undefined
-+
-+      this.runningCommit = running
-+      this.localCommit = local
-+      log.info('[FlatpakUpdater] Update available:', { running, local, remote })
-+
-+      if (remote && remote !== local) {
-+        this.startUpdate(sig.path ?? this.monitorHandle)
-+      } else if (local && running && local !== running) {
-+        this.markUpdateReady()
-+      }
-+    } else if (sig.member === 'Progress') {
-+      const info = decodeDict(sig.body, sig.le)
-+      const status = typeof info.status === 'number' ? info.status : STATUS_RUNNING
-+      const progress = typeof info.progress === 'number' ? info.progress : 0
-+      const op = typeof info.op === 'number' ? info.op : 0
-+      const nOps = typeof info.n_ops === 'number' ? info.n_ops : 0
-+      const error = typeof info.error === 'string' ? info.error : undefined
-+      const errorMessage = typeof info.error_message === 'string' ? info.error_message : undefined
-+
-+      if (status === STATUS_RUNNING) {
-+        const percent = nOps > 0
-+          ? Math.min(99, Math.max(0, Math.round(((op + progress / 100) / nOps) * 100)))
-+          : Math.min(99, Math.max(0, progress))
-+        this.emit('download-progress', { percent })
-+      } else if (status === STATUS_DONE) {
-+        log.info('[FlatpakUpdater] Update installed and ready')
-+        this.updating = false
-+        this.markUpdateReady()
-+        this.resolveDownload?.()
-+        this.clearDownloadPromise()
-+      } else if (status === STATUS_EMPTY) {
-+        this.updating = false
-+        if ((this.localCommit && this.runningCommit && this.localCommit !== this.runningCommit) || existsSync('/app/.updated')) {
-+          this.markUpdateReady()
-+          this.resolveDownload?.()
-+        } else {
-+          this.rejectDownload?.(new Error('No update available'))
-+        }
-+        this.clearDownloadPromise()
-+      } else if (status === STATUS_FAILED) {
-+        const msg = errorMessage || error || 'Flatpak update failed'
-+        log.error('[FlatpakUpdater] Update failed:', { error, errorMessage })
-+        this.updating = false
-+        this.rejectDownload?.(new Error(msg))
-+        this.clearDownloadPromise()
-+      }
-+    }
-+  }
-+
-+  private clearDownloadPromise () {
-+    this.downloadPromise = undefined
-+    this.resolveDownload = undefined
-+    this.rejectDownload = undefined
-+  }
-+
-+  private startUpdate (handle?: string) {
-+    if (this.updating || !handle || !this.client) return
-+    this.updating = true
-+    this.downloadPromise = new Promise<void>((resolve, reject) => {
-+      this.resolveDownload = resolve
-+      this.rejectDownload = reject
-+    })
-+    // Avoid unhandledRejection if nobody is awaiting updateReady()
-+    this.downloadPromise.catch(() => {})
-+
-+    // Method Update(s parent_window, a{sv} options): "" + empty a{sv}
-+    // Empty string (u32(0) + NUL = 5 bytes) padded to 4 -> 8 bytes,
-+    // followed by empty a{sv} (u32(0) + 4-byte pad for 8-byte dict_entry = 8 bytes) -> 16 zero bytes.
-+    const body = Buffer.alloc(16)
-+    this.client.call(PORTAL_DEST, handle, MONITOR_IFACE, 'Update', 'sa{sv}', body).catch((err: Error) => {
-+      log.error('[FlatpakUpdater] Update() call failed:', err)
-+      this.updating = false
-+      this.rejectDownload?.(err)
-+      this.clearDownloadPromise()
-+    })
-+  }
-+
-+  async checkForUpdates (): Promise<void> {
-+    if (this.closed || this.hasUpdate) return
-+    if (existsSync('/app/.updated')) {
-+      this.markUpdateReady()
-+      return
-+    }
-+    try {
-+      await this.ensureMonitor()
-+    } catch (err) {
-+      log.error('[FlatpakUpdater] Failed to initialize update monitor:', err)
-+    }
-+  }
-+
-+  async waitForUpdateReady (): Promise<void> {
-+    if (this.hasUpdate) return
-+    if (existsSync('/app/.updated')) {
-+      this.markUpdateReady()
-+      return
-+    }
-+    if (this.downloadPromise) {
-+      await this.downloadPromise
-+      return
-+    }
-+    const handle = await this.ensureMonitor()
-+    this.startUpdate(handle)
-+    if (this.downloadPromise) await this.downloadPromise
-+  }
-+
-+  close () {
-+    this.closed = true
-+    this.rejectDownload?.(new Error('Updater closed'))
-+    this.clearDownloadPromise()
-+    const client = this.client
-+    this.client = undefined
-+    this.monitorHandle = undefined
-+    this.monitorPromise = undefined
-+    client?.close()
-+  }
-+
-+  install (forceRunAfter = false): boolean {
-+    this.close()
-+    if (!this.hasUpdate) return false
-+    this.hasUpdate = false
++  async quitAndInstall (forceRunAfter: boolean) {
 +    if (forceRunAfter) {
-+      // Release the single-instance lock before spawning the updated version
++      // the new instance would quit if this one still held the lock
 +      app.releaseSingleInstanceLock()
-+      const child = spawn('flatpak-spawn', ['--latest-version', '/app/bin/hayase'], {
-+        detached: true,
-+        stdio: 'ignore'
-+      })
-+      child.on('error', (err) => log.error('[FlatpakUpdater] Failed to relaunch latest version:', err))
-+      child.unref()
-+      app.quit()
-+      return true
++      // an empty command runs the app's default command, --verbose prints child_pid once it runs
++      const child = spawn('flatpak-spawn', ['--latest-version', '--verbose', ''], { stdio: ['ignore', 'ignore', 'pipe'] })
++      child.once('error', err => log.error('Failed to relaunch Flatpak:', err))
++      for await (const chunk of child.stderr) {
++        if (String(chunk).includes('child_pid')) break
++      }
++      // flatpak-spawn waits for the new instance and keeps this one's files open, SIGKILL stops it without forwarding the signal
++      child.kill('SIGKILL')
 +    }
-+    // The new Flatpak commit is already deployed; normal app.quit() completes the update
-+    return false
++    app.quit()
 +  }
 +}
 diff --git a/src/main/ipc.ts b/src/main/ipc.ts
-index 3c8ef7e..9f8945d 100644
+index 3c8ef7e..82cb60e 100644
 --- a/src/main/ipc.ts
 +++ b/src/main/ipc.ts
 @@ -6,7 +6,6 @@ import { env } from 'node:process'
@@ -656,7 +86,7 @@ index 3c8ef7e..9f8945d 100644
  
  import store from './store'
  
-@@ -167,11 +166,10 @@ export default class IPC {
+@@ -167,11 +166,8 @@ export default class IPC {
    }
  
    updateProgress () {
@@ -665,14 +95,12 @@ index 3c8ef7e..9f8945d 100644
 -    })
 -    autoUpdater.on('update-downloaded', () => {
 -      this.app.mainWindow.webContents.send('update-progress', 100)
-+    this.app.updater.onProgress((percent) => {
-+      if (!this.app.mainWindow.isDestroyed()) {
-+        this.app.mainWindow.webContents.send('update-progress', percent)
-+      }
++    this.app.updater.onProgress(percent => {
++      this.app.mainWindow.webContents.send('update-progress', percent)
      })
    }
  
-@@ -180,13 +178,11 @@ export default class IPC {
+@@ -180,13 +176,16 @@ export default class IPC {
    }
  
    async checkUpdate () {
@@ -684,15 +112,20 @@ index 3c8ef7e..9f8945d 100644
 -    const update = await autoUpdater.checkForUpdates()
 -    if (!update) throw new Error('No update available')
 -    await update.downloadPromise
-+    await this.app.updater.waitForUpdateReady()
++    await this.app.updater.updateReady()
++  }
++
++  async updateAndRestart () {
++    await this.app.updater.flatpak?.update()
++    this.app.destroy(true)
    }
  
    async spawnPlayer (url: string) {
 diff --git a/src/main/updater.ts b/src/main/updater.ts
-index cca27ce..0684ff6 100644
+index cca27ce..f5f0b1d 100644
 --- a/src/main/updater.ts
 +++ b/src/main/updater.ts
-@@ -1,13 +1,32 @@
+@@ -1,23 +1,53 @@
 +import { env } from 'node:process'
 +
  import { autoUpdater } from 'electron-updater'
@@ -700,11 +133,13 @@ index cca27ce..0684ff6 100644
 -// autoUpdater.forceDevUpdateConfig = true
 -autoUpdater.setFeedURL({ url: 'https://api.hayase.watch/files', provider: 'generic' })
 -autoUpdater.checkForUpdates()
-+import FlatpakUpdater from './flatpak-updater.ts'
++import Flatpak from './flatpak.ts'
 +
-+const IS_FLATPAK = Boolean(env.FLATPAK_ID)
++import type { ProgressInfo } from 'electron-updater'
++import type { EventEmitter } from 'node:events'
 +
-+if (!IS_FLATPAK) {
++// the software center updates Flatpak apps, electron-updater would download the .deb and fail to install it with dpkg
++if (!env.FLATPAK_ID) {
 +  // autoUpdater.forceDevUpdateConfig = true
 +  autoUpdater.setFeedURL({ url: 'https://api.hayase.watch/files', provider: 'generic' })
 +  autoUpdater.checkForUpdates()
@@ -712,62 +147,54 @@ index cca27ce..0684ff6 100644
  
  export default class Updater {
    hasUpdate = false
-+  private flatpak?: FlatpakUpdater
++  flatpak = env.FLATPAK_ID ? new Flatpak() : undefined
++  updater: EventEmitter = this.flatpak ?? autoUpdater
  
    constructor () {
-+    if (IS_FLATPAK) {
-+      this.flatpak = new FlatpakUpdater()
-+      this.flatpak.on('update-downloaded', () => {
-+        this.hasUpdate = true
-+      })
-+      void this.flatpak.checkForUpdates()
-+      setInterval(() => void this.flatpak?.checkForUpdates(), 1000 * 60 * 30).unref() // 30 mins
-+      return
-+    }
-+
-     autoUpdater.on('update-downloaded', () => {
+-    autoUpdater.on('update-downloaded', () => {
++    this.updater.on('update-downloaded', () => {
        this.hasUpdate = true
      })
-@@ -15,7 +34,42 @@ export default class Updater {
-     setInterval(() => autoUpdater.checkForUpdates(), 1000 * 60 * 30).unref() // 30 mins
-   }
  
-+  onProgress (cb: (percent: number) => void) {
-+    if (this.flatpak) {
-+      this.flatpak.on('download-progress', (progress: { percent: number }) => cb(progress.percent))
-+      this.flatpak.on('update-downloaded', () => cb(100))
-+      if (this.hasUpdate) cb(100)
-+      return
-+    }
+-    setInterval(() => autoUpdater.checkForUpdates(), 1000 * 60 * 30).unref() // 30 mins
++    if (!this.flatpak) setInterval(() => autoUpdater.checkForUpdates(), 1000 * 60 * 30).unref() // 30 mins
++  }
 +
-+    autoUpdater.on('download-progress', (progress) => cb(progress.percent))
-+    autoUpdater.on('update-downloaded', () => cb(100))
++  onProgress (listener: (percent: number) => void) {
++    this.updater.on('download-progress', (progress: ProgressInfo) => listener(progress.percent))
++    this.updater.on('update-downloaded', () => listener(100))
 +  }
 +
 +  async checkForUpdates () {
-+    if (this.flatpak) {
-+      await this.flatpak.checkForUpdates()
-+      return
-+    }
-+    await autoUpdater.checkForUpdates()
++    if (this.flatpak) await this.flatpak.check()
++    else await autoUpdater.checkForUpdates()
 +  }
 +
-+  async waitForUpdateReady () {
-+    if (this.flatpak) {
-+      await this.flatpak.waitForUpdateReady()
-+      return
-+    }
++  async updateReady () {
++    if (this.flatpak) return await this.flatpak.updateReady()
 +    const update = await autoUpdater.checkForUpdates()
 +    if (!update) throw new Error('No update available')
 +    await update.downloadPromise
-+  }
-+
+   }
+ 
    install (forceRunAfter = false) {
-+    if (this.flatpak) {
-+      const handled = this.flatpak.install(forceRunAfter)
-+      this.hasUpdate = false
-+      return handled
-+    }
      if (this.hasUpdate) {
-       autoUpdater.quitAndInstall(true, forceRunAfter)
+-      autoUpdater.quitAndInstall(true, forceRunAfter)
++      if (this.flatpak) this.flatpak.quitAndInstall(forceRunAfter)
++      else autoUpdater.quitAndInstall(true, forceRunAfter)
        this.hasUpdate = false
+       return true
+     }
+diff --git a/src/preload/index.ts b/src/preload/index.ts
+index 465fb0d..281afa4 100644
+--- a/src/preload/index.ts
++++ b/src/preload/index.ts
+@@ -40,7 +40,7 @@ const native: Partial<Native> = {
+   maximise: () => main.maximise(),
+   close: () => main.close(),
+   checkUpdate: () => main.checkUpdate(),
+-  updateAndRestart: () => main.app.destroy(true),
++  updateAndRestart: () => main.updateAndRestart(),
+   updateReady: () => main.updateReady(),
+   enableCORS: (urls) => main.enableCORS(urls),
+   unsafeUseInternalALAPI: () => main.unsafeUseInternalALAPI(),

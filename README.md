@@ -55,7 +55,7 @@ flatpak uninstall --user watch.hayase.Hayase
 |---|---|
 | `watch.hayase.Hayase.yml` | The flatpak-builder manifest (the entry point). |
 | `generated-sources.json` | Offline npm/pnpm dependency graph, so the sandboxed build needs no npm network access. Generated with `flatpak-node-generator` (pnpm backend). |
-| `flatpak-updater.patch` | Routes in-app updates through Flatpak's native `UpdateMonitor` portal when `FLATPAK_ID` is set (leaving non-Flatpak builds untouched). |
+| `flatpak-updater.patch` | Replaces `electron-updater` inside Flatpak (`FLATPAK_ID` set) with Flathub AppStream API + `/app/.updated` checks, `appstream://` software-center updates, and clean relaunch via `flatpak-spawn --latest-version` ([`hayase-app/electron#8`](https://github.com/hayase-app/electron/pull/8)). |
 | `watch.hayase.Hayase.desktop` | Desktop entry. |
 | `watch.hayase.Hayase.metainfo.xml` | AppStream metadata. |
 | `flathub.json` | Flathub build config (restricts to x86_64). Not read by a local build. |
@@ -69,7 +69,7 @@ succeed.
    applies the updater patch, installs dependencies offline with pnpm, and runs
    `electron-builder`. Main-process chunks are compiled to V8 bytecode exactly
    as in upstream's official builds (a build-only copy of the custom runtime,
-   with its run-as-Node fuse re-enabled, serves as the bytecode compiler, since
+   with its loader/codegen fuses relaxed, serves as the bytecode compiler, since
    V8 only accepts bytecode from the exact runtime build that loads it).
 2. **Custom Electron runtime** — upstream's custom Electron (which adds HEVC /
    AC3 / E-AC3 codec support and extra security fuses) is not published as a
